@@ -1,0 +1,746 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local TextChatService = game:GetService("TextChatService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LP = Players.LocalPlayer
+
+-- Create Folder for ESP parts
+local Folder = workspace:FindFirstChild("WaypointESP") or Instance.new("Folder")
+Folder.Name = "WaypointESP"
+Folder.Parent = workspace
+
+local ESP = {}
+local TweenInfoESP = TweenInfo.new(0.03, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+
+-- Follow/Goto system variables
+local followTarget = nil
+local gotoRetryData = nil -- {Player, LastPos, Attempts}
+local followOffset = Vector3.new(0, 2, 0)
+local isFollowing = false
+local isGotoRetry = false
+local maxGotoRetries = 999
+
+-- GUI Setup
+local sg = Instance.new("ScreenGui")
+sg.Name = "ESP_UI"
+sg.Parent = game.CoreGui
+sg.ResetOnSpawn = false
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 180, 0, 80)
+MainFrame.Position = UDim2.new(0.85, -180, 0.85, -80)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = sg
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.Position = UDim2.new(0, 0, 0, 5)
+Title.BackgroundTransparency = 1
+Title.Font = Enum.Font.GothamBold
+Title.Text = "📍 Waypoint ESP [N]"
+Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+Title.TextSize = 16
+
+local ToggleBtn = Instance.new("TextButton", MainFrame)
+ToggleBtn.Size = UDim2.new(0, 80, 0, 30)
+ToggleBtn.Position = UDim2.new(0.5, -40, 0, 40)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.Text = "OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+ToggleBtn.TextSize = 14
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local espEnabled = false
+
+-- ========== PLAYER SEARCH FUNCTION ==========
+local function getPlayerByName(searchName)
+    local searchNameLower = searchName:lower()
+    local searchLen = #searchNameLower
+    local found = {}
+    
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local nameLower = plr.Name:lower()
+            local displayNameLower = plr.DisplayName:lower()
+            
+            if nameLower:sub(1, searchLen) == searchNameLower or 
+               displayNameLower:sub(1, searchLen) == searchNameLower then
+                table.insert(found, plr)
+            end
+        end
+    end
+    
+    return found
+end
+
+-- ========== TELEPORT TO POSITION FUNCTION ==========
+local function teleportToPosition(position)
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(position + followOffset)
+        return true
+    end
+    return false
+end
+
+-- ========== GOTO RETRY FUNCTION ==========
+local function startGotoRetry(targetPlayer)
+    -- Stop any existing goto retry
+    if isGotoRetry then
+        gotoRetryData = nil
+        isGotoRetry = false
+    end
+    
+    -- Check if player is already loaded
+    local targetChar = targetPlayer.Character
+    local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+    
+    if targetHRP then
+        -- Player is loaded, teleport instantly
+        teleportToPosition(targetHRP.Position)
+        print("✅ Teleported to " .. targetPlayer.DisplayName .. "!")
+        return true
+    end
+    
+    -- Player is not loaded, start retry system
+    print("⏳ " .. targetPlayer.DisplayName .. " is not loaded. Will keep trying to teleport...")
+    
+    gotoRetryData = {
+        Player = targetPlayer,
+        Attempts = 0,
+        LastPos = nil
+    }
+    isGotoRetry = true
+    
+    -- Try to get their last known position
+    local lastPos = targetPlayer:GetAttribute("LastPosition")
+    if typeof(lastPos) == "Vector3" then
+        gotoRetryData.LastPos = lastPos
+        -- Try teleporting to last known position
+        teleportToPosition(lastPos)
+    end
+    
+    return true
+end
+
+-- ========== COMMAND HANDLERS ==========
+local function handleGotoCommand(msg)
+    if not msg:lower():find("/goto") then return false end
+    
+    local _, commandEnd = msg:find("/goto%s+")
+    if not commandEnd then
+        print("⚠️ Usage: /goto (player name)")
+        return false
+    end
+    
+    local searchName = msg:sub(commandEnd + 1)
+    if #searchName == 0 then
+        print("⚠️ Usage: /goto (player name)")
+        return false
+    end
+    
+    -- Stop any existing goto retry
+    if isGotoRetry then
+        gotoRetryData = nil
+        isGotoRetry = false
+        print("🛑 Stopped previous goto retry")
+    end
+    
+    local foundPlayers = getPlayerByName(searchName)
+    
+    if #foundPlayers == 0 then
+        print("❌ No player found with name starting with: " .. searchName)
+        return false
+    end
+    
+    if #foundPlayers > 1 then
+        local names = {}
+        for _, plr in ipairs(foundPlayers) do
+            table.insert(names, plr.DisplayName)
+        end
+        print("⚠️ Multiple players found: " .. table.concat(names, ", "))
+        print("Please be more specific.")
+        return false
+    end
+    
+    local targetPlayer = foundPlayers[1]
+    
+    -- Start the goto retry system
+    startGotoRetry(targetPlayer)
+    return true
+end
+
+local function handleFollowCommand(msg)
+    if not msg:lower():find("/follow") then return false end
+    
+    local _, commandEnd = msg:find("/follow%s+")
+    if not commandEnd then
+        if isFollowing then
+            followTarget = nil
+            isFollowing = false
+            print("✅ Stopped following")
+        else
+            print("⚠️ Usage: /follow (player name) or /follow to stop")
+        end
+        return true
+    end
+    
+    local searchName = msg:sub(commandEnd + 1)
+    if #searchName == 0 then
+        if isFollowing then
+            followTarget = nil
+            isFollowing = false
+            print("✅ Stopped following")
+        else
+            print("⚠️ Usage: /follow (player name) or /follow to stop")
+        end
+        return true
+    end
+    
+    -- Stop following previous target
+    if isFollowing then
+        followTarget = nil
+        isFollowing = false
+        print("✅ Stopped following previous target")
+    end
+    
+    -- Also stop any goto retry
+    if isGotoRetry then
+        gotoRetryData = nil
+        isGotoRetry = false
+        print("🛑 Stopped goto retry")
+    end
+    
+    local foundPlayers = getPlayerByName(searchName)
+    
+    if #foundPlayers == 0 then
+        print("❌ No player found with name starting with: " .. searchName)
+        return false
+    end
+    
+    if #foundPlayers > 1 then
+        local names = {}
+        for _, plr in ipairs(foundPlayers) do
+            table.insert(names, plr.DisplayName)
+        end
+        print("⚠️ Multiple players found: " .. table.concat(names, ", "))
+        print("Please be more specific.")
+        return false
+    end
+    
+    local targetPlayer = foundPlayers[1]
+    
+    -- Start following even if they're not loaded yet
+    followTarget = targetPlayer
+    isFollowing = true
+    followTarget._notifiedLoaded = false
+    
+    -- Check if they're already loaded
+    local targetChar = targetPlayer.Character
+    local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+    
+    if targetHRP then
+        print("✅ Now following " .. targetPlayer.DisplayName .. "!")
+    else
+        print("⏳ " .. targetPlayer.DisplayName .. " is not loaded. Will follow when they load...")
+    end
+    
+    print("💡 Type /follow or /unfollow to stop following")
+    return true
+end
+
+-- ========== UNFOLLOW COMMAND ==========
+local function handleUnfollowCommand(msg)
+    if not msg:lower():find("/unfollow") then return false end
+    
+    if isFollowing and followTarget then
+        local targetName = followTarget.DisplayName
+        followTarget = nil
+        isFollowing = false
+        print("✅ Stopped following " .. targetName)
+    else
+        print("⚠️ You are not currently following anyone")
+    end
+    
+    -- Also stop any goto retry
+    if isGotoRetry then
+        gotoRetryData = nil
+        isGotoRetry = false
+        print("🛑 Stopped goto retry")
+    end
+    
+    return true
+end
+
+-- ========== CHAT LISTENER ==========
+local function setupChatListener()
+    local isLegacyChat = TextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService
+    
+    if isLegacyChat then
+        print("Using Legacy Chat System")
+        
+        LP.Chatted:Connect(function(msg)
+            if not handleGotoCommand(msg) then
+                if not handleFollowCommand(msg) then
+                    handleUnfollowCommand(msg)
+                end
+            end
+        end)
+        
+        task.spawn(function()
+            repeat task.wait(0.5) until LP:FindFirstChild("PlayerGui")
+            local playerGui = LP.PlayerGui
+            local chat = playerGui:FindFirstChild("Chat")
+            if chat then
+                local chatBar = chat:FindFirstChild("Frame") and 
+                               chat.Frame:FindFirstChild("ChatBarParentFrame") and
+                               chat.Frame.ChatBarParentFrame:FindFirstChild("Frame") and
+                               chat.Frame.ChatBarParentFrame.Frame:FindFirstChild("BoxFrame") and
+                               chat.Frame.ChatBarParentFrame.Frame.BoxFrame:FindFirstChild("Frame") and
+                               chat.Frame.ChatBarParentFrame.Frame.BoxFrame.Frame:FindFirstChild("ChatBar")
+                if chatBar then
+                    chatBar.FocusLost:Connect(function(enterPressed)
+                        if enterPressed and chatBar.Text:sub(1,1) == "/" then
+                            if not handleGotoCommand(chatBar.Text) then
+                                if not handleFollowCommand(chatBar.Text) then
+                                    handleUnfollowCommand(chatBar.Text)
+                                end
+                            end
+                        end
+                    end)
+                end
+            end
+        end)
+        
+    else
+        print("Using TextChatService")
+        
+        local textChannel = TextChatService:FindFirstChild("TextChannels") and 
+                           TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+        
+        if textChannel then
+            textChannel.MessageReceived:Connect(function(message)
+                if message.TextSource and message.TextSource.UserId == LP.UserId then
+                    if not handleGotoCommand(message.Text) then
+                        if not handleFollowCommand(message.Text) then
+                            handleUnfollowCommand(message.Text)
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end
+
+-- ========== GOTO RETRY SYSTEM ==========
+-- This runs every frame to check if we need to retry a goto
+RunService.Heartbeat:Connect(function()
+    -- Handle goto retry
+    if isGotoRetry and gotoRetryData then
+        local targetPlayer = gotoRetryData.Player
+        
+        -- Check if player still exists
+        if not targetPlayer or not targetPlayer.Parent then
+            print("❌ Target player no longer exists")
+            gotoRetryData = nil
+            isGotoRetry = false
+            return
+        end
+        
+        -- Try to get their character
+        local targetChar = targetPlayer.Character
+        local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+        
+        if targetHRP then
+            -- Target is now loaded! Teleport instantly
+            teleportToPosition(targetHRP.Position)
+            print("✅ Teleported to " .. targetPlayer.DisplayName .. " (loaded)!")
+            gotoRetryData = nil
+            isGotoRetry = false
+            return
+        end
+        
+        -- Still not loaded, try to use LastPosition attribute
+        local lastPos = targetPlayer:GetAttribute("LastPosition")
+        if typeof(lastPos) == "Vector3" then
+            -- Update last known position
+            gotoRetryData.LastPos = lastPos
+            -- Teleport to last known position every few frames
+            gotoRetryData.Attempts = gotoRetryData.Attempts + 1
+            if gotoRetryData.Attempts % 3 == 0 then -- Every 3 frames (about 0.05 seconds)
+                teleportToPosition(lastPos)
+            end
+        end
+        
+        -- Check if we've exceeded max retries
+        if gotoRetryData.Attempts > maxGotoRetries * 60 then -- ~60 seconds at 60fps
+            print("⚠️ Giving up on teleporting to " .. targetPlayer.DisplayName .. " (timeout)")
+            gotoRetryData = nil
+            isGotoRetry = false
+        end
+    end
+end)
+
+-- ========== FOLLOW SYSTEM ==========
+RunService.Heartbeat:Connect(function()
+    if not isFollowing or not followTarget then return end
+    
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    
+    -- Try to get the target's character
+    local targetChar = followTarget.Character
+    local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+    
+    -- If target is not loaded, try to use LastPosition
+    if not targetHRP then
+        local lastPos = followTarget:GetAttribute("LastPosition")
+        if typeof(lastPos) == "Vector3" then
+            -- Move towards last known position
+            hrp.CFrame = CFrame.new(lastPos + followOffset)
+        end
+        return
+    end
+    
+    -- Target is loaded! Instant teleport to them
+    local targetPos = targetHRP.Position + followOffset
+    hrp.CFrame = CFrame.new(targetPos)
+    
+    -- If we just started following and they weren't loaded, notify when they load
+    if not followTarget._notifiedLoaded then
+        followTarget._notifiedLoaded = true
+        print("✅ " .. followTarget.DisplayName .. " loaded! Now following instantly.")
+    end
+end)
+
+-- ========== PLAYER/CHARACTER ADDED HANDLERS ==========
+-- When a player joins, check if they're our follow target or goto target
+Players.PlayerAdded:Connect(function(plr)
+    if isFollowing and followTarget and plr == followTarget then
+        print("🔄 " .. plr.DisplayName .. " joined the game! Following now...")
+        followTarget._notifiedLoaded = false
+    end
+    if isGotoRetry and gotoRetryData and gotoRetryData.Player == plr then
+        print("🔄 " .. plr.DisplayName .. " joined the game! Goto retry active...")
+    end
+end)
+
+-- When any player's character loads, check if they're our target
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        if isFollowing and followTarget and plr == followTarget then
+            print("🔄 " .. plr.DisplayName .. " respawned! Following now...")
+            followTarget._notifiedLoaded = false
+        end
+        if isGotoRetry and gotoRetryData and gotoRetryData.Player == plr then
+            print("🔄 " .. plr.DisplayName .. " respawned! Goto retry active...")
+            -- Reset attempts so we try again
+            if gotoRetryData then
+                gotoRetryData.Attempts = 0
+            end
+        end
+    end)
+end)
+
+-- Also handle existing players
+for _, plr in pairs(Players:GetPlayers()) do
+    plr.CharacterAdded:Connect(function()
+        if isFollowing and followTarget and plr == followTarget then
+            print("🔄 " .. plr.DisplayName .. " respawned! Following now...")
+            followTarget._notifiedLoaded = false
+        end
+        if isGotoRetry and gotoRetryData and gotoRetryData.Player == plr then
+            print("🔄 " .. plr.DisplayName .. " respawned! Goto retry active...")
+            if gotoRetryData then
+                gotoRetryData.Attempts = 0
+            end
+        end
+    end)
+end
+
+-- ========== ESP SYSTEM ==========
+local function createESP(plr)
+    if plr == LP or ESP[plr] then return end
+
+    local part = Instance.new("Part")
+    part.Name = plr.Name .. "_Waypoint"
+    part.Size = Vector3.new(2, 2, 2)
+    part.Transparency = 1
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.Position = Vector3.new(0, -9999, 0)
+    part.Parent = Folder
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "Waypoint"
+    gui.AlwaysOnTop = true
+    gui.Size = UDim2.new(0, 200, 0, 160)
+    gui.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+    gui.Enabled = false
+    gui.Parent = part
+
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 1, 0)
+    container.BackgroundTransparency = 1
+    container.Parent = gui
+
+    local nameText = Instance.new("TextLabel")
+    nameText.Size = UDim2.new(1, 0, 0, 20)
+    nameText.Position = UDim2.new(0, 0, 0, 0)
+    nameText.BackgroundTransparency = 1
+    nameText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameText.TextStrokeTransparency = 0
+    nameText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    nameText.Font = Enum.Font.GothamBold
+    nameText.TextSize = 16
+    nameText.Text = plr.DisplayName
+    nameText.Parent = container
+
+    local waypointIcon = Instance.new("Frame")
+    waypointIcon.AnchorPoint = Vector2.new(0.5, 0)
+    waypointIcon.Position = UDim2.new(0.5, 0, 0, 25)
+    waypointIcon.Size = UDim2.new(0, 30, 0, 30)
+    waypointIcon.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    waypointIcon.BackgroundTransparency = 0.8
+    waypointIcon.BorderSizePixel = 2
+    waypointIcon.BorderColor3 = Color3.fromRGB(0, 200, 255)
+    waypointIcon.Parent = container
+    
+    local iconCorner = Instance.new("UICorner")
+    iconCorner.CornerRadius = UDim.new(1, 0)
+    iconCorner.Parent = waypointIcon
+
+    local innerGlow = Instance.new("Frame")
+    innerGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+    innerGlow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    innerGlow.Size = UDim2.new(0, 15, 0, 15)
+    innerGlow.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    innerGlow.BackgroundTransparency = 0.4
+    innerGlow.BorderSizePixel = 0
+    innerGlow.Parent = waypointIcon
+    
+    local glowCorner = Instance.new("UICorner")
+    glowCorner.CornerRadius = UDim.new(1, 0)
+    glowCorner.Parent = innerGlow
+
+    local distText = Instance.new("TextLabel")
+    distText.Size = UDim2.new(1, 0, 0, 18)
+    distText.Position = UDim2.new(0, 0, 0, 58)
+    distText.BackgroundTransparency = 1
+    distText.TextColor3 = Color3.fromRGB(200, 200, 200)
+    distText.TextStrokeTransparency = 0
+    distText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    distText.Font = Enum.Font.Gotham
+    distText.TextSize = 14
+    distText.Text = "0 m"
+    distText.Parent = container
+
+    local healthBg = Instance.new("Frame")
+    healthBg.Size = UDim2.new(0, 80, 0, 6)
+    healthBg.Position = UDim2.new(0.5, -40, 0, 80)
+    healthBg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    healthBg.BorderSizePixel = 0
+    healthBg.Parent = container
+    
+    local bgCorner = Instance.new("UICorner")
+    bgCorner.CornerRadius = UDim.new(1, 0)
+    bgCorner.Parent = healthBg
+
+    local healthBar = Instance.new("Frame")
+    healthBar.Size = UDim2.new(1, 0, 1, 0)
+    healthBar.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+    healthBar.BorderSizePixel = 0
+    healthBar.Parent = healthBg
+    
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(1, 0)
+    barCorner.Parent = healthBar
+
+    local healthText = Instance.new("TextLabel")
+    healthText.Size = UDim2.new(1, 0, 0, 14)
+    healthText.Position = UDim2.new(0, 0, 0, 88)
+    healthText.BackgroundTransparency = 1
+    healthText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    healthText.TextStrokeTransparency = 0
+    healthText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    healthText.Font = Enum.Font.Gotham
+    healthText.TextSize = 12
+    healthText.Text = "20 HP"
+    healthText.Parent = container
+
+    ESP[plr] = {
+        Part = part,
+        Gui = gui,
+        NameText = nameText,
+        DistanceText = distText,
+        HealthBar = healthBar,
+        HealthBg = healthBg,
+        HealthText = healthText,
+        WaypointIcon = waypointIcon,
+        InnerGlow = innerGlow,
+        Tween = nil,
+        LastPos = nil,
+        Player = plr
+    }
+end
+
+local function removeESP(plr)
+    local esp = ESP[plr]
+    if esp then
+        if esp.Tween then
+            esp.Tween:Cancel()
+        end
+        esp.Part:Destroy()
+        ESP[plr] = nil
+    end
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+    createESP(plr)
+end
+
+Players.PlayerAdded:Connect(createESP)
+Players.PlayerRemoving:Connect(removeESP)
+
+-- Main ESP update loop
+RunService.RenderStepped:Connect(function()
+    for plr, esp in pairs(ESP) do
+        if not espEnabled then
+            esp.Gui.Enabled = false
+            continue
+        end
+
+        local pos = plr:GetAttribute("LastPosition")
+        local hp = plr:GetAttribute("Health") or plr:GetAttribute("health")
+        local maxHp = 20
+
+        if typeof(pos) == "Vector3" then
+            esp.Gui.Enabled = true
+
+            if not esp.LastPos then
+                esp.LastPos = pos
+                esp.Part.Position = pos
+            end
+
+            if (esp.LastPos - pos).Magnitude > 0.05 then
+                esp.LastPos = pos
+
+                if esp.Tween then
+                    esp.Tween:Cancel()
+                end
+
+                esp.Tween = TweenService:Create(
+                    esp.Part,
+                    TweenInfoESP,
+                    {Position = pos}
+                )
+                esp.Tween:Play()
+            end
+
+            esp.NameText.Text = plr.DisplayName
+
+            local char = LP.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local distance = math.floor((hrp.Position - pos).Magnitude / 4)
+                esp.DistanceText.Text = distance .. " m"
+            else
+                esp.DistanceText.Text = "0 m"
+            end
+
+            if typeof(hp) == "number" then
+                local clampedHp = math.clamp(hp, 0, 20)
+                local healthPercent = clampedHp / 20
+                esp.HealthBar.Size = UDim2.new(healthPercent, 0, 1, 0)
+                esp.HealthText.Text = math.floor(clampedHp) .. " / 20 HP"
+                
+                if clampedHp >= 15 then
+                    esp.HealthBar.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+                    esp.HealthText.TextColor3 = Color3.fromRGB(0, 255, 0)
+                elseif clampedHp >= 5 then
+                    esp.HealthBar.BackgroundColor3 = Color3.fromRGB(255, 255, 0)
+                    esp.HealthText.TextColor3 = Color3.fromRGB(255, 255, 0)
+                else
+                    esp.HealthBar.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+                    esp.HealthText.TextColor3 = Color3.fromRGB(255, 0, 0)
+                end
+            else
+                esp.HealthBar.Size = UDim2.new(1, 0, 1, 0)
+                esp.HealthBar.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+                esp.HealthText.Text = "? / 20 HP"
+                esp.HealthText.TextColor3 = Color3.fromRGB(200, 200, 200)
+            end
+
+            if hrp then
+                local dist = (hrp.Position - pos).Magnitude / 4
+                if dist < 30 then
+                    esp.WaypointIcon.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+                    esp.WaypointIcon.BorderColor3 = Color3.fromRGB(0, 255, 0)
+                    esp.InnerGlow.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+                elseif dist < 75 then
+                    esp.WaypointIcon.BackgroundColor3 = Color3.fromRGB(255, 255, 0)
+                    esp.WaypointIcon.BorderColor3 = Color3.fromRGB(255, 255, 0)
+                    esp.InnerGlow.BackgroundColor3 = Color3.fromRGB(255, 255, 0)
+                else
+                    esp.WaypointIcon.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+                    esp.WaypointIcon.BorderColor3 = Color3.fromRGB(0, 200, 255)
+                    esp.InnerGlow.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+                end
+            end
+        else
+            esp.Gui.Enabled = false
+        end
+    end
+end)
+
+-- Toggle function
+local function toggleESP()
+    espEnabled = not espEnabled
+    if espEnabled then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+        ToggleBtn.Text = "ON"
+        ToggleBtn.TextColor3 = Color3.fromRGB(100, 255, 100)
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        ToggleBtn.Text = "OFF"
+        ToggleBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+        for _, esp in pairs(ESP) do
+            esp.Gui.Enabled = false
+        end
+    end
+end
+
+ToggleBtn.Activated:Connect(toggleESP)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.N then
+        toggleESP()
+    end
+end)
+
+-- ========== START CHAT LISTENER ==========
+setupChatListener()
+
+print("📍 Waypoint ESP Loaded! Press N to toggle")
+print("💡 Commands:")
+print("  /goto (partial name) - Teleport to a player (keeps trying until they load)")
+print("  /follow (partial name) - INSTANTLY follow a player (waits for them to load)")
+print("  /follow - Stop following")
+print("  /unfollow - Stop following")
+print("Max health set to 20 HP")
+print("Distance values divided by 4 (1 meter = 4 studs)")
